@@ -91,46 +91,9 @@ def ytimg_fallback_urls(video_id: str):
     ]
 
 
-def pick_best_thumbnail_url(meta: dict) -> str | None:
-    thumbs = meta.get("thumbnails") or []
-    best_url = None
-    best_score = -1
-
-    for t in thumbs:
-        url = t.get("url")
-        if not url:
-            continue
-
-        w = t.get("width") or 0
-        h = t.get("height") or 0
-        score = (w * h) if (w and h) else 0
-
-        u = url.lower()
-        if "maxres" in u:
-            score += 10_000_000
-        elif "sddefault" in u:
-            score += 1_000_000
-        elif "hq720" in u:
-            score += 900_000
-        elif "hqdefault" in u:
-            score += 800_000
-
-        if score > best_score:
-            best_score = score
-            best_url = url
-
-    if best_url:
-        return best_url
-    if meta.get("thumbnail"):
-        return meta["thumbnail"]
-    return None
-
-
-def format_upload_date(date_str: str | None) -> str | None:
-    """YYYYMMDD -> YYYY-MM-DD"""
-    if not date_str or len(date_str) != 8:
-        return date_str
-    return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+def get_best_thumbnail_url(video_id: str) -> str:
+    """video_id로부터 최고 해상도 썸네일 URL 반환"""
+    return f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg"
 
 
 # ────────────────────────────────────────────────────────────────
@@ -317,9 +280,11 @@ class DownloadWorker(QThread):
         except (DownloadError, ExtractorError) as e:
             reason = "members-only" if is_membership_only_error(e) else "metadata-error"
             return {"error": True, "reason": reason}
+        except Exception as e:
+            return {"error": True, "reason": f"metadata-error: {str(e)}"}
 
         title = meta.get("title")
-        thumb_url = pick_best_thumbnail_url(meta)
+        thumb_url = get_best_thumbnail_url(video_id)
 
         thumb_result = {"ok": False, "path": None, "cached": False}
         if download_thumbs:
@@ -328,11 +293,13 @@ class DownloadWorker(QThread):
         if download_subs:
             result = {
                 "id": video_id,
-                "url": f"https://www.youtube.com/watch?v={video_id}",
+                "url": meta.get("url") or f"https://www.youtube.com/watch?v={video_id}",
                 "title": title,
+                "uploader": meta.get("uploader"),
                 "view_count": meta.get("view_count"),
-                "upload_date": format_upload_date(meta.get("upload_date")),
+                "upload_date": meta.get("upload_date"),
                 "duration": meta.get("duration"),
+                "description": meta.get("description"),
                 "thumbnail_url": thumb_url,
                 "thumbnail_local_path": thumb_result.get("path") if download_thumbs else None,
                 "transcript": None,
@@ -349,10 +316,10 @@ class DownloadWorker(QThread):
         else:
             result = {
                 "id": video_id,
-                "url": f"https://www.youtube.com/watch?v={video_id}",
+                "url": meta.get("url") or f"https://www.youtube.com/watch?v={video_id}",
                 "title": title,
                 "view_count": meta.get("view_count"),
-                "upload_date": format_upload_date(meta.get("upload_date")),
+                "upload_date": meta.get("upload_date"),
             }
 
         return {
@@ -524,7 +491,7 @@ class MainWindow(QMainWindow):
         url_layout.addRow("영상 개수:", self.num_videos_spin)
 
         self.mode_combo = QComboBox()
-        self.mode_combo.addItems(["regular", "shorts"])
+        self.mode_combo.addItems(["all", "regular", "shorts"])
         url_layout.addRow("모드:", self.mode_combo)
 
         basic_layout.addWidget(url_group)
