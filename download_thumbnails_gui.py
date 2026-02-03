@@ -334,8 +334,11 @@ class DownloadWorker(QThread):
         channel_url = self.config["channel_url"]
         num_videos = self.config["num_videos"]
         mode = self.config["mode"]
-        download_thumbs = self.config["download_thumbs"]
-        download_subs = self.config["download_subs"]
+        metadata_only = self.config.get("metadata_only", False)
+        download_thumbs = self.config["download_thumbs"] and not metadata_only
+        download_subs = self.config["download_subs"] and not metadata_only
+        save_links = self.config.get("save_links", False)
+        links_file = self.config.get("links_file", "links.txt")
         out_dir = self.config["out_dir"]
         data_dir = self.config["data_dir"]
         manifest = self.config["manifest"]
@@ -355,7 +358,24 @@ class DownloadWorker(QThread):
             return
 
         self.log.emit(f"총 {len(video_ids)}개 영상 발견")
-        self.log.emit(f"옵션: 썸네일={'O' if download_thumbs else 'X'}, 자막={'O' if download_subs else 'X'}")
+
+        # 링크 리스트 저장
+        if save_links:
+            links = [f"https://www.youtube.com/watch?v={vid}" for vid in video_ids]
+            with open(links_file, "w", encoding="utf-8") as f:
+                f.write("\n".join(links))
+            self.log.emit(f"링크 리스트 저장됨: {links_file} ({len(links)}개)")
+
+        # 메타데이터만 추출하거나 썸네일/자막 없이 링크만 저장하는 경우
+        if metadata_only or (not download_thumbs and not download_subs):
+            options_str = []
+            if metadata_only:
+                options_str.append("메타데이터만")
+            if save_links:
+                options_str.append("링크저장")
+            self.log.emit(f"옵션: {', '.join(options_str) if options_str else '기본'}")
+        else:
+            self.log.emit(f"옵션: 썸네일={'O' if download_thumbs else 'X'}, 자막={'O' if download_subs else 'X'}")
 
         all_data = []
         skipped = []
@@ -448,6 +468,9 @@ class DownloadWorker(QThread):
             "thumb_count": thumb_count,
             "transcript_count": transcript_count,
             "cached_count": cached_count,
+            "links_saved": save_links,
+            "links_file": links_file if save_links else None,
+            "metadata_only": metadata_only,
         })
 
 
@@ -500,6 +523,11 @@ class MainWindow(QMainWindow):
         dl_group = QGroupBox("다운로드 옵션")
         dl_layout = QVBoxLayout(dl_group)
 
+        self.metadata_only_check = QCheckBox("메타데이터만 추출 (썸네일/자막 없이)")
+        self.metadata_only_check.setChecked(False)
+        self.metadata_only_check.stateChanged.connect(self.on_metadata_only_changed)
+        dl_layout.addWidget(self.metadata_only_check)
+
         self.thumbs_check = QCheckBox("썸네일 다운로드")
         self.thumbs_check.setChecked(False)
         dl_layout.addWidget(self.thumbs_check)
@@ -513,6 +541,25 @@ class MainWindow(QMainWindow):
         dl_layout.addWidget(self.skip_exists_check)
 
         basic_layout.addWidget(dl_group)
+
+        # 링크 리스트 저장 옵션
+        links_group = QGroupBox("링크 리스트 저장")
+        links_layout = QVBoxLayout(links_group)
+
+        self.save_links_check = QCheckBox("YouTube 링크 리스트 저장")
+        self.save_links_check.setChecked(False)
+        links_layout.addWidget(self.save_links_check)
+
+        links_file_row = QHBoxLayout()
+        self.links_file_input = QLineEdit("links.txt")
+        links_file_row.addWidget(self.links_file_input)
+        links_file_btn = QPushButton("...")
+        links_file_btn.setMaximumWidth(30)
+        links_file_btn.clicked.connect(self.browse_links_file)
+        links_file_row.addWidget(links_file_btn)
+        links_layout.addLayout(links_file_row)
+
+        basic_layout.addWidget(links_group)
 
         # 폴더 설정
         folder_group = QGroupBox("폴더/파일 설정")
@@ -637,6 +684,23 @@ class MainWindow(QMainWindow):
         if folder:
             line_edit.setText(folder)
 
+    def browse_links_file(self):
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "링크 파일 저장", "links.txt", "Text Files (*.txt);;All Files (*)"
+        )
+        if file_path:
+            self.links_file_input.setText(file_path)
+
+    def on_metadata_only_changed(self, state):
+        if state == Qt.CheckState.Checked.value:
+            self.thumbs_check.setChecked(False)
+            self.subs_check.setChecked(False)
+            self.thumbs_check.setEnabled(False)
+            self.subs_check.setEnabled(False)
+        else:
+            self.thumbs_check.setEnabled(True)
+            self.subs_check.setEnabled(True)
+
     def get_config(self) -> dict:
         return {
             "channel_url": self.url_input.text().strip(),
@@ -644,8 +708,11 @@ class MainWindow(QMainWindow):
             "mode": self.mode_combo.currentText(),
             "timeout_sec": self.timeout_spin.value(),
             "skip_exists": self.skip_exists_check.isChecked(),
+            "metadata_only": self.metadata_only_check.isChecked(),
             "download_thumbs": self.thumbs_check.isChecked(),
             "download_subs": self.subs_check.isChecked(),
+            "save_links": self.save_links_check.isChecked(),
+            "links_file": self.links_file_input.text().strip() or "links.txt",
             "out_dir": self.out_dir_input.text().strip() or "thumbnails",
             "data_dir": self.data_dir_input.text().strip() or "data",
             "manifest": self.manifest_input.text().strip() or "manifest.json",
@@ -665,8 +732,15 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "경고", "채널 URL을 입력하세요.")
             return
 
-        if not config["download_thumbs"] and not config["download_subs"]:
-            QMessageBox.warning(self, "경고", "썸네일 또는 자막 중 하나 이상을 선택하세요.")
+        # 최소 하나의 작업이 선택되어야 함
+        has_work = (
+            config["download_thumbs"] or
+            config["download_subs"] or
+            config["metadata_only"] or
+            config["save_links"]
+        )
+        if not has_work:
+            QMessageBox.warning(self, "경고", "최소 하나의 옵션을 선택하세요.")
             return
 
         self.log_text.clear()
@@ -701,13 +775,18 @@ class MainWindow(QMainWindow):
         if "error" in result:
             QMessageBox.critical(self, "오류", f"다운로드 실패: {result['error']}")
         else:
-            QMessageBox.information(
-                self, "완료",
-                f"다운로드 완료!\n\n"
-                f"성공: {result.get('ok_count', 0)}/{result.get('total', 0)}\n"
-                f"썸네일: {result.get('thumb_count', 0)}\n"
-                f"자막: {result.get('transcript_count', 0)}"
-            )
+            msg_parts = [f"성공: {result.get('ok_count', 0)}/{result.get('total', 0)}"]
+
+            if result.get("links_saved"):
+                msg_parts.append(f"링크 파일: {result.get('links_file')}")
+
+            if not result.get("metadata_only"):
+                if result.get("thumb_count", 0) > 0:
+                    msg_parts.append(f"썸네일: {result.get('thumb_count', 0)}")
+                if result.get("transcript_count", 0) > 0:
+                    msg_parts.append(f"자막: {result.get('transcript_count', 0)}")
+
+            QMessageBox.information(self, "완료", "완료!\n\n" + "\n".join(msg_parts))
 
 
 def main():
